@@ -310,6 +310,20 @@ body {
   border: 1.5px solid transparent;
 }
 
+/* Own channel — pinned hero card */
+.channel-card[data-type="own"] {
+  border-color: rgba(255, 0, 0, 0.5);
+  box-shadow: 0 0 16px rgba(255, 0, 0, 0.12);
+  grid-column: 1 / -1;
+}
+.channel-card[data-type="own"]:hover {
+  border-color: rgba(255, 0, 0, 0.9);
+  box-shadow: 0 0 24px rgba(255, 0, 0, 0.3), 0 8px 24px rgba(0,0,0,0.4);
+}
+.channel-card[data-type="own"] .card-metrics {
+  gap: 16px;
+}
+
 /* Type-based glow borders */
 .channel-card[data-type="direct"] {
   border-color: rgba(255, 78, 69, 0.4);
@@ -974,6 +988,7 @@ body {
 // DEFAULT CHANNELS
 // ============================================================
 const DEFAULT_CHANNELS = [
+  { id: 'UClWTCPVi-AU9TeCN6FkGARg', name: 'EO', handle: '@eoglobal', type: 'own', subscribers: 657000, videoCount: 400, avgViews: 99000, notes: 'Our channel. Global business & tech interviews.', avatar: '', videos: [] },
   { id: 'UCcefcZRL2oaA_uBNeo5UOWg', name: 'Y Combinator', handle: '@ycombinator', type: 'direct', subscribers: 2170000, videoCount: 978, avgViews: 105000, notes: 'Startup playbook. 2022 strategic pivot with Zach Both. "How to" format dominates.', avatar: '', videos: [] },
   { id: 'UC9cn0TuPq4dnbTY-CBsm8XA', name: 'a16z', handle: '@a16z', type: 'direct', subscribers: 111000, videoCount: 860, avgViews: 3800, notes: 'VC media empire. Low YouTube views but massive influence. $360M/yr media operation.', avatar: '', videos: [] },
   { id: 'UCsBjURrPoezykLs9EqgamOA', name: 'Fireship', handle: '@fireship', type: 'potential', subscribers: 4100000, videoCount: 800, avgViews: 1500000, notes: '"100 seconds of" format. Developer audience overlaps with tech-curious EO viewers.', avatar: '', videos: [] },
@@ -1021,6 +1036,8 @@ function loadChannels() {
       // Migrate: big media channels → bigmedia
       const bigMediaNames = ['the wall street journal','bloomberg originals','bloomberg','tbpn','ted'];
       channels.forEach(ch => { if (bigMediaNames.includes(ch.name.toLowerCase())) ch.type = 'bigmedia'; });
+      // Migrate: EO Global → own channel
+      channels.forEach(ch => { if (ch.handle === '@eoglobal') ch.type = 'own'; });
       return channels;
     } catch(e) {}
   }
@@ -1122,15 +1139,16 @@ async function fetchRecentVideos(playlistId, maxResults = 6) {
 async function refreshChannel(channel) {
   try {
     let api = channel.id ? await fetchChannelById(channel.id) : channel.handle ? await fetchChannelByHandle(channel.handle) : null;
-    if (!api) return channel;
+    if (!api) return { ...channel, _refreshError: 'Channel not found (no ID or handle)' };
     const uploads = api.contentDetails?.relatedPlaylists?.uploads;
     const videos = uploads ? await fetchRecentVideos(uploads, 6) : [];
     const keywordTitles = videos._keywordTitles || videos.slice(0, 10).map(v => v.title);
     const uploadsPerWeek = videos._uploadsPerWeek || null;
     const s = api.statistics;
     const vc = parseInt(s.videoCount||0);
-    return { ...channel, id: api.id, name: api.snippet.title, avatar: api.snippet.thumbnails?.default?.url || '', subscribers: parseInt(s.subscriberCount||0), videoCount: vc, avgViews: vc > 0 ? Math.round(parseInt(s.viewCount||0)/vc) : 0, videos, keywordTitles, uploadsPerWeek, lastRefreshed: new Date().toISOString() };
-  } catch (err) { console.error(`Failed: ${channel.name}`, err); return channel; }
+    const recentAvg = videos.length > 0 ? Math.round(videos.reduce((sum, v) => sum + (v.views||0), 0) / videos.length) : 0;
+    return { ...channel, id: api.id, name: api.snippet.title, avatar: api.snippet.thumbnails?.default?.url || '', subscribers: parseInt(s.subscriberCount||0), videoCount: vc, avgViews: recentAvg || (vc > 0 ? Math.round(parseInt(s.viewCount||0)/vc) : 0), videos, keywordTitles, uploadsPerWeek, lastRefreshed: new Date().toISOString(), _refreshError: null };
+  } catch (err) { console.error(`Failed: ${channel.name}`, err); return { ...channel, _refreshError: err.message || 'Unknown error' }; }
 }
 
 async function refreshAll() {
@@ -1139,16 +1157,30 @@ async function refreshAll() {
   const btn = document.getElementById('refreshBtn');
   btn.innerHTML = '<span class="loading-spinner"></span> Loading';
   btn.disabled = true;
+  let successCount = 0;
+  const failures = [];
   for (let i = 0; i < state.channels.length; i++) {
-    showStatus(`Fetching ${i+1}/${state.channels.length}...`, '');
+    showStatus(`Fetching ${i+1}/${state.channels.length}: ${state.channels[i].name}...`, '');
     state.channels[i] = await refreshChannel(state.channels[i]);
+    if (state.channels[i]._refreshError) {
+      failures.push({ name: state.channels[i].name, error: state.channels[i]._refreshError });
+    } else {
+      successCount++;
+    }
     saveChannels(); render();
   }
   state.loading = false;
   btn.textContent = 'Refresh';
   btn.disabled = false;
-  showStatus(`Updated ${state.channels.length} channels`, 'success');
-  setTimeout(() => hideStatus(), 3000);
+  if (failures.length === 0) {
+    showStatus(`Updated ${successCount} channels`, 'success');
+    setTimeout(() => hideStatus(), 3000);
+  } else if (successCount === 0) {
+    showStatus(`All ${failures.length} channels failed: ${failures[0].error}`, 'error');
+  } else {
+    showStatus(`Updated ${successCount} channels, ${failures.length} failed: ${failures.map(f => f.name).join(', ')}`, 'error');
+    setTimeout(() => hideStatus(), 8000);
+  }
 }
 
 // ============================================================
@@ -1215,14 +1247,15 @@ function render() {
 }
 
 function renderSummary() {
-  const ch = state.channels;
+  const competitors = state.channels.filter(c => c.type !== 'own');
+  const lastRefreshed = state.channels.find(c => c.lastRefreshed)?.lastRefreshed;
   document.getElementById('summaryBar').innerHTML = `
-    <div class="summary-stat"><strong>${ch.length}</strong> Channels</div>
-    <div class="summary-stat"><span class="type-dot direct"></span><strong>${ch.filter(c=>c.type==='direct').length}</strong> Direct</div>
-    <div class="summary-stat"><span class="type-dot potential"></span><strong>${ch.filter(c=>c.type==='potential').length}</strong> Industry</div>
-    <div class="summary-stat"><span class="type-dot bigmedia"></span><strong>${ch.filter(c=>c.type==='bigmedia').length}</strong> Big Media</div>
+    <div class="summary-stat"><strong>${competitors.length}</strong> Channels</div>
+    <div class="summary-stat"><span class="type-dot direct"></span><strong>${competitors.filter(c=>c.type==='direct').length}</strong> Direct</div>
+    <div class="summary-stat"><span class="type-dot potential"></span><strong>${competitors.filter(c=>c.type==='potential').length}</strong> Industry</div>
+    <div class="summary-stat"><span class="type-dot bigmedia"></span><strong>${competitors.filter(c=>c.type==='bigmedia').length}</strong> Big Media</div>
     <div class="summary-stat" style="font-size:11px;font-weight:300;">
-      ${ch[0]?.lastRefreshed ? 'Updated ' + new Date(ch[0].lastRefreshed).toLocaleString() : ''}
+      ${lastRefreshed ? 'Updated ' + new Date(lastRefreshed).toLocaleString() : ''}
     </div>
     <button class="add-channel-top-btn" onclick="openAddModal()">+ Add Channel</button>`;
 }
@@ -1327,16 +1360,34 @@ function renderFilters() {
 }
 
 function getFilteredChannels() {
-  let ch = [...state.channels];
+  let ch = state.channels.filter(c => c.type !== 'own');
   if (state.filter !== 'all') ch = ch.filter(c => c.type === state.filter);
   ch.sort((a,b) => state.sort === 'name' ? a.name.localeCompare(b.name) : (b[state.sort]||0)-(a[state.sort]||0));
   return ch;
 }
 
+function getOwnChannel() {
+  return state.channels.find(c => c.type === 'own') || null;
+}
+
 function renderCards() {
   const channels = getFilteredChannels();
+  const own = getOwnChannel();
   let cardsHTML = '';
   let cardNum = 0;
+
+  // Pinned own channel card at top
+  if (own) {
+    const ownIdx = state.channels.indexOf(own);
+    cardsHTML += `
+      <div class="section-divider">
+        <span class="section-divider-dot" style="background:var(--yt-red)"></span>
+        <span class="section-divider-label">Our Channel</span>
+        <span class="section-divider-line"></span>
+      </div>`;
+    cardsHTML += renderCard(own, ownIdx, cardNum);
+    cardNum++;
+  }
 
   if (state.filter === 'all') {
     // Group by type with section dividers
@@ -1358,7 +1409,7 @@ function renderCards() {
       cardsHTML += group.map(ch => { const html = renderCard(ch, state.channels.indexOf(ch), cardNum); cardNum++; return html; }).join('');
     });
   } else {
-    cardsHTML = channels.map(ch => { const html = renderCard(ch, state.channels.indexOf(ch), cardNum); cardNum++; return html; }).join('');
+    cardsHTML += channels.map(ch => { const html = renderCard(ch, state.channels.indexOf(ch), cardNum); cardNum++; return html; }).join('');
   }
 
   document.getElementById('mainContent').innerHTML = `
@@ -1405,17 +1456,17 @@ function renderCard(ch, idx, cardNum = 0) {
         ${ch.avatar ? `<img class="card-avatar" src="${ch.avatar}" alt="">` : `<div class="card-avatar" style="display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:var(--text2)">${ch.name.charAt(0)}</div>`}
         <div class="card-info">
           <div class="card-name"><a href="${url}" target="_blank">${escapeHtml(ch.name)}</a></div>
-          <div class="card-handle">${escapeHtml(ch.handle || ch.id)}</div>
+          <div class="card-handle">${escapeHtml(ch.handle || ch.id)}${ch.lastRefreshed ? ` · ${getTimeAgo(ch.lastRefreshed)}` : ' · never refreshed'}${ch._refreshError ? ' · <span style="color:var(--direct)">error</span>' : ''}</div>
           <div class="card-badges">
             <span class="badge tier-${tier.toLowerCase()}">${tier}</span>
-            <select class="edit-select" onchange="updateChannelType(${idx},this.value)">
+            ${ch.type === 'own' ? '<span style="font-size:11px;color:var(--yt-red);font-weight:500;">Our Channel</span>' : `<select class="edit-select" onchange="updateChannelType(${idx},this.value)">
               <option value="direct" ${ch.type==='direct'?'selected':''}>Direct</option>
               <option value="potential" ${ch.type==='potential'?'selected':''}>Industry</option>
               <option value="bigmedia" ${ch.type==='bigmedia'?'selected':''}>Big Media</option>
-            </select>
+            </select>`}
           </div>
         </div>
-        <button class="card-action-btn" onclick="removeChannel(${idx})" title="Remove">✕</button>
+        ${ch.type !== 'own' ? `<button class="card-action-btn" onclick="removeChannel(${idx})" title="Remove">✕</button>` : ''}
       </div>
       <div class="card-metrics">
         <div class="metric"><div class="metric-value">${formatNum(ch.subscribers)}</div><div class="metric-label">Subscribers</div></div>
@@ -1442,6 +1493,8 @@ function renderCard(ch, idx, cardNum = 0) {
 // MATRIX VIEW
 // ============================================================
 function renderMatrix() {
+  const own = getOwnChannel();
+  const ownTier = own ? getTier(own.subscribers) : null;
   const types = ['direct','potential','bigmedia'];
   const tiers = ['S','A','B','C'];
   let html = '<div class="matrix-container"><div class="matrix">';
@@ -1452,17 +1505,18 @@ function renderMatrix() {
 
   tiers.forEach(tier => {
     html += `<div class="matrix-row-label" style="color:var(--tier-${tier.toLowerCase()})">${tier}</div>`;
-    types.forEach(type => {
+    types.forEach((type, colIdx) => {
       const cells = state.channels.filter(c => c.type === type && getTier(c.subscribers) === tier);
-      const isEo = tier === 'B' && type === 'direct';
-      html += `<div class="matrix-cell${isEo?' eo-cell':''}">`;
-      if (isEo) html += '<div class="eo-marker">EO Global 650K</div>';
+      // Show EO marker in the Direct column at EO's tier
+      const showEo = own && tier === ownTier && colIdx === 0;
+      html += `<div class="matrix-cell${showEo?' eo-cell':''}">`;
+      if (showEo) html += `<div class="eo-marker">EO ${formatNum(own.subscribers)}</div>`;
       cells.forEach(ch => {
         html += `<div class="matrix-channel-chip" title="${escapeHtml(ch.name)} — ${formatNum(ch.subscribers)}">
           ${ch.avatar?`<img src="${ch.avatar}" alt="">`:''}<span>${escapeHtml(ch.name)}</span>
           <span style="color:var(--text2);font-size:10px;">${formatNum(ch.subscribers)}</span></div>`;
       });
-      if (!cells.length && !isEo) html += '<span style="font-size:11px;color:var(--text2);">—</span>';
+      if (!cells.length && !showEo) html += '<span style="font-size:11px;color:var(--text2);">—</span>';
       html += '</div>';
     });
   });
@@ -1563,6 +1617,17 @@ function extractKeywords(titles) {
 // UTILITIES
 // ============================================================
 function escapeHtml(str) { if (!str) return ''; const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+
+function getTimeAgo(isoStr) {
+  const diff = Date.now() - new Date(isoStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  const days = Math.floor(hrs / 24);
+  return days + 'd ago';
+}
 
 function resetToDefaults() {
   if (confirm('Reset all channels to defaults?')) { localStorage.removeItem('eo_channels'); state.channels = JSON.parse(JSON.stringify(DEFAULT_CHANNELS)); saveChannels(); render(); }
